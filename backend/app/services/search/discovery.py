@@ -14,8 +14,10 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.metrics import PROVIDER_LATENCY, PROVIDER_REQUESTS
 from app.services.search.llm import llm_rerank
 from app.services.search.providers import BaseProvider, ProviderResponse
+from app.services.search.ratelimit import acquire as rate_limit_acquire
 from app.services.search.reachability import check_domain
 from app.services.search.verifier import is_aggregator, name_domain_match, verify
 
@@ -179,8 +181,15 @@ async def discover_domain(
     attempts: list[SearchAttempt] = []
 
     for provider in providers:
+        # Smooth bursts to a sustainable per-provider request rate.
+        await rate_limit_acquire(provider.name)
         resp = await provider.search(client, query)
         responses.append(resp)
+
+        # Provider-level observability.
+        outcome = "error" if resp.error else ("success" if resp.results else "empty")
+        PROVIDER_REQUESTS.labels(provider=provider.name, outcome=outcome).inc()
+        PROVIDER_LATENCY.labels(provider=provider.name).observe(resp.response_time_ms / 1000)
 
         result_domain = resp.results[0].url if resp.results else None
         attempts.append(

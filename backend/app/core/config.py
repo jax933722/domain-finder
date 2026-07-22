@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
+    # ---- Observability ----
+    # "text" (human-readable) or "json" (structured, for log aggregators).
+    LOG_FORMAT: str = "text"
+    METRICS_ENABLED: bool = True
+    # The worker exposes its Prometheus metrics on this port (separate process).
+    WORKER_METRICS_PORT: int = 9100
+
     # ---- Security ----
     SECRET_KEY: str = Field(default="CHANGE_ME_IN_PRODUCTION_super_secret_key")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 1 day
@@ -126,6 +133,14 @@ class Settings(BaseSettings):
     CONFIDENCE_THRESHOLD: float = 0.6
     # Max concurrent company lookups inside a single processing job.
     JOB_CONCURRENCY: int = 10
+    # Rows inserted per DB batch (bulk insert) — tune for throughput vs. memory.
+    DB_INSERT_BATCH: int = 500
+    # Per-provider global rate limit (requests/sec across the whole worker).
+    # 0 disables rate limiting.
+    PROVIDER_RATE_LIMIT_PER_SEC: float = 8.0
+    # Celery task time limits (seconds). Hard kill and a slightly earlier soft warn.
+    TASK_TIME_LIMIT: int = 60 * 60 * 6
+    TASK_SOFT_TIME_LIMIT: int = 60 * 60 * 6 - 60
 
     # ---- Live reachability confirmation ----
     # After a domain is identified, optionally confirm it actually responds and

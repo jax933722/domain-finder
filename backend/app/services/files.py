@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import csv
 import os
 from typing import Any
 
 import pandas as pd
+from openpyxl import Workbook
 
 from app.core.config import settings
 
@@ -134,27 +136,27 @@ def dataframe_preview(df: pd.DataFrame, limit: int = 20) -> dict[str, Any]:
     }
 
 
+def _output_row(r: dict[str, Any]) -> list[Any]:
+    """One enriched row as an ordered list matching ``OUTPUT_COLUMNS``."""
+    return [
+        r.get("original_company", ""),
+        r.get("clean_company", ""),
+        r.get("official_domain") or "NOT FOUND",
+        r.get("verification_status", ""),
+        r.get("confidence", 0.0),
+        r.get("source_used") or "",
+        r.get("search_url") or "",
+        f"{r.get('processing_time_ms', 0)} ms",
+    ]
+
+
 def build_results_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Assemble the enriched output DataFrame in the required column order."""
-    normalized = []
-    for r in rows:
-        normalized.append(
-            {
-                "Original Company": r.get("original_company", ""),
-                "Clean Company Name": r.get("clean_company", ""),
-                "Official Domain": r.get("official_domain") or "NOT FOUND",
-                "Verification Status": r.get("verification_status", ""),
-                "Confidence": r.get("confidence", 0.0),
-                "Source Used": r.get("source_used") or "",
-                "Search URL": r.get("search_url") or "",
-                "Processing Time": f"{r.get('processing_time_ms', 0)} ms",
-            }
-        )
-    return pd.DataFrame(normalized, columns=OUTPUT_COLUMNS)
+    return pd.DataFrame([_output_row(r) for r in rows], columns=OUTPUT_COLUMNS)
 
 
 def write_results(job_id: str, rows: list[dict[str, Any]]) -> tuple[str, str]:
-    """Write both XLSX and CSV outputs; return their paths."""
+    """Write both XLSX and CSV outputs; return their paths (in-memory helper)."""
     ensure_dirs()
     df = build_results_dataframe(rows)
     xlsx_path = os.path.join(settings.RESULT_DIR, f"{job_id}.xlsx")
@@ -163,3 +165,41 @@ def write_results(job_id: str, rows: list[dict[str, Any]]) -> tuple[str, str]:
         df.to_excel(writer, index=False, sheet_name="Results")
     df.to_csv(csv_path, index=False)
     return xlsx_path, csv_path
+
+
+class StreamingResultWriter:
+    """Write CSV + XLSX one row at a time so memory stays flat for huge jobs.
+
+    XLSX uses openpyxl's ``write_only`` workbook (streams rows to disk); CSV is
+    written incrementally with the stdlib ``csv`` module. Intended to be fed from
+    a server-side DB cursor so a 100k+ row export never materializes in memory.
+    """
+
+    def __init__(self, job_id: str):
+        ensure_dirs()
+        self.xlsx_path = os.path.join(settings.RESULT_DIR, f"{job_id}.xlsx")
+        self.csv_path = os.path.join(settings.RESULT_DIR, f"{job_id}.csv")
+
+        self._csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
+        self._csv_writer = csv.writer(self._csv_file)
+        self._csv_writer.writerow(OUTPUT_COLUMNS)
+
+        self._wb = Workbook(write_only=True)
+        self._ws = self._wb.create_sheet("Results")
+        self._ws.append(OUTPUT_COLUMNS)
+        self._closed = False
+
+    def write_row(self, r: dict[str, Any]) -> None:
+        row = _output_row(r)
+        self._csv_writer.writerow(row)
+        self._ws.append(row)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._csv_file.flush()
+            self._csv_file.close()
+        finally:
+            self._wb.save(self.xlsx_path)

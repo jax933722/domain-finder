@@ -6,6 +6,7 @@ event loop to fan out concurrent lookups.
 """
 
 from celery import Celery
+from celery.signals import worker_ready
 
 from app.core.config import settings
 
@@ -27,4 +28,14 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     result_expires=60 * 60 * 24,
     broker_connection_retry_on_startup=True,
+    task_time_limit=settings.TASK_TIME_LIMIT,
+    task_soft_time_limit=settings.TASK_SOFT_TIME_LIMIT,
 )
+
+
+@worker_ready.connect
+def _start_metrics(**_kwargs) -> None:
+    """Expose Prometheus metrics once the worker is up (main process)."""
+    from app.core.metrics import start_worker_metrics_server
+
+    start_worker_metrics_server()

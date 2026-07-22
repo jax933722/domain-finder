@@ -51,6 +51,42 @@ trusted internet sources, and exports the enriched file.
 - **Dark mode**, responsive design, clean shadcn-style UI.
 - **Dockerized** with Postgres, Redis, backend, worker, frontend, and Nginx.
 
+### Scale
+
+- **Bulk inserts** — results are written with SQLAlchemy Core batch `INSERT`s
+  (configurable `DB_INSERT_BATCH`), not per-row ORM adds.
+- **Streaming export** — the enriched CSV/XLSX are generated from a server-side
+  DB cursor and written a row at a time (openpyxl write-only + stdlib `csv`), so
+  a 100k+ row export never materializes in memory.
+- **In-flight de-duplication** — concurrent rows for the same company coalesce
+  onto a single lookup (in addition to the Redis/DB cache across runs).
+- **Per-provider rate limiting** — a process-wide token bucket
+  (`PROVIDER_RATE_LIMIT_PER_SEC`) smooths bursts so providers don't return 429s.
+- **Bounded concurrency**, Celery task time limits, `acks_late`, and a prefetch
+  of 1 so work spreads evenly; scale out by adding `worker` replicas.
+
+### Observability
+
+- **Prometheus metrics** on both the API (`GET /metrics`) and the worker
+  (`:9100`): HTTP request rate/latency, jobs by status, active jobs, rows
+  processed, domain-lookup outcomes (verified/not-found/cache-hit) and latency,
+  and per-provider request outcomes and latency.
+- **Correlation IDs** — every request gets an `X-Request-ID` (honored if the
+  client sends one) that appears in structured logs.
+- **Structured logging** — set `LOG_FORMAT=json` for aggregator-friendly output.
+- **Liveness vs. readiness** — `/health` (process up) and `/health/ready`
+  (Postgres + Redis reachable, 503 if not).
+
+Bring up the metrics stack (Prometheus at http://localhost:9090):
+
+```bash
+docker compose --profile observability up -d prometheus
+```
+
+The worker runs with `PROMETHEUS_MULTIPROC_DIR` set so metrics aggregate across
+Celery prefork children; Prometheus scrapes both `backend:8000` and `worker:9100`
+(see `observability/prometheus.yml`).
+
 ### Robustness
 
 - **Live reachability check** — a found domain is probed (HEAD→GET, redirects

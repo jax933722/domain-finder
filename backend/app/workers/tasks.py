@@ -21,11 +21,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.metrics import (
+    ACTIVE_JOBS,
+    JOB_ROWS,
+    JOBS_TOTAL,
+    LOOKUP_LATENCY,
+    LOOKUPS_TOTAL,
+)
 from app.db.models import (
     CachedDomain,
     Company,
@@ -39,7 +46,7 @@ from app.db.models import (
 )
 from app.services import cache
 from app.services.cleaning import cache_key_for, clean_company_name
-from app.services.files import read_dataframe, write_results
+from app.services.files import StreamingResultWriter, read_dataframe
 from app.services.search.discovery import create_http_client, discover_domain
 from app.services.search.providers import build_providers
 from app.workers.celery_app import celery_app
@@ -128,52 +135,46 @@ async def _process(
 
     counters = {"processed": 0, "found": 0, "not_found": 0, "cache_hits": 0}
     resolved: dict[str, dict[str, Any]] = {}
+    inflight: dict[str, asyncio.Future] = {}
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(settings.JOB_CONCURRENCY)
+    job_uuid = uuid.UUID(job_id)
 
     client = create_http_client()
+    ACTIVE_JOBS.inc()
     try:
         async def handle_row(index: int, raw: str) -> dict[str, Any]:
             async with semaphore:
                 return await _resolve_row(
-                    factory, job_id, index, raw, providers, client, resolved, lock, counters
+                    factory, job_id, index, raw, providers, client,
+                    resolved, inflight, lock, counters,
                 )
 
-        batch_size = 200
-        for start in range(0, total, batch_size):
-            batch = list(enumerate(raw_values[start : start + batch_size], start=start))
+        # Process in bounded batches: fan out lookups, then bulk-insert the rows.
+        batch_size = min(settings.DB_INSERT_BATCH, max(50, settings.JOB_CONCURRENCY * 20))
+        for batch_start in range(0, total, batch_size):
+            batch = list(enumerate(raw_values[batch_start : batch_start + batch_size], start=batch_start))
             results = await asyncio.gather(*(handle_row(i, v) for i, v in batch))
 
+            company_rows = [{**r["company"], "job_id": job_uuid} for r in results]
+            history_rows = [{**r["history"], "job_id": job_uuid} for r in results]
             async with factory() as session:
-                for res in results:
-                    session.add(Company(job_id=uuid.UUID(job_id), **res["company"]))
-                    session.add(SearchHistory(job_id=uuid.UUID(job_id), **res["history"]))
+                if company_rows:
+                    # Core bulk INSERT — far faster than per-row ORM adds at scale.
+                    await session.execute(insert(Company), company_rows)
+                    await session.execute(insert(SearchHistory), history_rows)
                 await session.commit()
 
+            JOB_ROWS.inc(len(results))
             await _publish_progress(factory, job_id, total, counters)
 
+        # Stream results from the DB straight to disk so memory stays flat even
+        # for very large jobs (no "load all rows" spike).
         await _log(factory, job_id, LogLevel.INFO, "Writing result files")
-        async with factory() as session:
-            rows_q = await session.execute(
-                select(Company).where(Company.job_id == uuid.UUID(job_id)).order_by(Company.row_index)
-            )
-            rows = [
-                {
-                    "original_company": c.original_company,
-                    "clean_company": c.clean_company,
-                    "official_domain": c.official_domain,
-                    "verification_status": c.verification_status.value,
-                    "confidence": c.confidence,
-                    "source_used": c.source_used,
-                    "search_url": c.search_url,
-                    "processing_time_ms": c.processing_time_ms,
-                }
-                for c in rows_q.scalars().all()
-            ]
-        xlsx_path, _csv_path = write_results(job_id, rows)
+        xlsx_path = await _export_results(factory, job_id)
 
         async with factory() as session:
-            job = await session.get(Job, uuid.UUID(job_id))
+            job = await session.get(Job, job_uuid)
             job.status = JobStatus.COMPLETED
             job.processed_rows = counters["processed"]
             job.found_count = counters["found"]
@@ -184,6 +185,7 @@ async def _process(
             session.add(job)
             await session.commit()
 
+        JOBS_TOTAL.labels(status="completed").inc()
         await _publish_progress(factory, job_id, total, counters, status=JobStatus.COMPLETED)
         await _log(
             factory,
@@ -193,7 +195,66 @@ async def _process(
             f"{counters['cache_hits']} cache hits",
         )
     finally:
+        ACTIVE_JOBS.dec()
         await client.aclose()
+
+
+async def _export_results(factory: async_sessionmaker[AsyncSession], job_id: str) -> str:
+    """Stream job rows to CSV + XLSX with bounded memory (server-side cursor)."""
+    writer = StreamingResultWriter(job_id)
+    stmt = (
+        select(Company)
+        .where(Company.job_id == uuid.UUID(job_id))
+        .order_by(Company.row_index)
+        .execution_options(yield_per=1000)
+    )
+    try:
+        async with factory() as session:
+            result = await session.stream(stmt)
+            async for company in result.scalars():
+                writer.write_row(
+                    {
+                        "original_company": company.original_company,
+                        "clean_company": company.clean_company,
+                        "official_domain": company.official_domain,
+                        "verification_status": company.verification_status.value,
+                        "confidence": company.confidence,
+                        "source_used": company.source_used,
+                        "search_url": company.search_url,
+                        "processing_time_ms": company.processing_time_ms,
+                    }
+                )
+    finally:
+        writer.close()
+    return writer.xlsx_path
+
+
+async def _discover_payload(clean: str, providers, client) -> dict[str, Any]:
+    """Run discovery and shape the cacheable payload, recording lookup metrics."""
+    start = time.perf_counter()
+    try:
+        result = await discover_domain(clean, providers, client)
+    except Exception as exc:  # noqa: BLE001 - never let one row kill the batch
+        logger.warning("Discovery raised for %r: %s", clean, exc)
+        return {
+            "official_domain": None,
+            "verification_status": VerificationStatus.ERROR.value,
+            "confidence": 0.0,
+            "source_used": None,
+            "search_url": None,
+            "search_query": f"{clean} official website",
+            "reason": f"Lookup error: {exc}",
+        }
+    LOOKUP_LATENCY.observe(time.perf_counter() - start)
+    return {
+        "official_domain": result.domain,
+        "verification_status": result.status,
+        "confidence": result.confidence,
+        "source_used": result.source,
+        "search_url": result.search_url,
+        "search_query": result.query,
+        "reason": result.reason,
+    }
 
 
 async def _resolve_row(
@@ -204,6 +265,7 @@ async def _resolve_row(
     providers,
     client,
     resolved: dict[str, dict[str, Any]],
+    inflight: dict[str, asyncio.Future],
     lock: asyncio.Lock,
     counters: dict[str, int],
 ) -> dict[str, Any]:
@@ -212,50 +274,52 @@ async def _resolve_row(
     key = cache_key_for(clean)
 
     from_cache = False
-    cached: dict[str, Any] | None = None
+    payload: dict[str, Any] | None = None
 
     if key:
+        # 1) Already resolved this run, or in the persistent cache?
         async with lock:
-            cached = resolved.get(key)
-        if cached is None:
-            cached = await cache.get_cached_domain(key)
-        if cached is not None:
+            payload = resolved.get(key)
+        if payload is None:
+            payload = await cache.get_cached_domain(key)
+        if payload is not None:
             from_cache = True
 
-    if cached is not None:
-        domain = cached.get("official_domain")
-        status = cached.get("verification_status", VerificationStatus.NOT_FOUND.value)
-        confidence = cached.get("confidence", 0.0)
-        source = cached.get("source_used")
-        search_url = cached.get("search_url")
-        query = cached.get("search_query")
-        reason = cached.get("reason")
-        provider_used = "cache"
-    else:
-        result = await discover_domain(clean, providers, client)
-        domain = result.domain
-        status = result.status
-        confidence = result.confidence
-        source = result.source
-        search_url = result.search_url
-        query = result.query
-        reason = result.reason
-        provider_used = source or "search"
-
-        payload = {
-            "official_domain": domain,
-            "verification_status": status,
-            "confidence": confidence,
-            "source_used": source,
-            "search_url": search_url,
-            "search_query": query,
-            "reason": reason,
-        }
-        if key:
-            async with lock:
-                resolved[key] = payload
+    if payload is None and key:
+        # 2) Coalesce concurrent identical lookups so a company is searched once
+        #    even when its duplicates are processed in parallel.
+        async with lock:
+            fut = inflight.get(key)
+            owner = fut is None
+            if owner:
+                fut = asyncio.get_running_loop().create_future()
+                inflight[key] = fut
+        if not owner:
+            payload = await fut  # reuse the in-flight result
+            from_cache = True
+        else:
+            try:
+                payload = await _discover_payload(clean, providers, client)
+            finally:
+                async with lock:
+                    resolved[key] = payload if payload is not None else {}
+                    inflight.pop(key, None)
+                if not fut.done():
+                    fut.set_result(payload if payload is not None else {})
             await cache.set_cached_domain(key, payload)
             await _upsert_cached_domain(factory, key, clean, payload)
+    elif payload is None:
+        # Empty cleaned name: resolve directly, nothing to cache.
+        payload = await _discover_payload(clean, providers, client)
+
+    domain = payload.get("official_domain")
+    status = payload.get("verification_status", VerificationStatus.NOT_FOUND.value)
+    confidence = payload.get("confidence", 0.0)
+    source = payload.get("source_used")
+    search_url = payload.get("search_url")
+    query = payload.get("search_query")
+    reason = payload.get("reason")
+    provider_used = "cache" if from_cache else (source or "search")
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
@@ -267,6 +331,13 @@ async def _resolve_row(
             counters["found"] += 1
         else:
             counters["not_found"] += 1
+
+    if from_cache:
+        LOOKUPS_TOTAL.labels(outcome="cache_hit").inc()
+    elif status == VerificationStatus.VERIFIED.value:
+        LOOKUPS_TOTAL.labels(outcome="verified").inc()
+    else:
+        LOOKUPS_TOTAL.labels(outcome="not_found").inc()
 
     log_msg = (
         f"[{index + 1}] {clean or '(empty)'} -> "
@@ -383,6 +454,7 @@ async def _fail_job(session: AsyncSession, job: Job, message: str) -> None:
     job.finished_at = datetime.now(timezone.utc)
     session.add(job)
     await session.commit()
+    JOBS_TOTAL.labels(status="failed").inc()
     await cache.set_progress(
         str(job.id),
         {

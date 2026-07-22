@@ -93,6 +93,11 @@ services:
       REDIS_HOST: redis
       SEARXNG_URL: http://searxng:8080
       OLLAMA_URL: http://ollama:11434
+      # Aggregate Prometheus metrics across Celery prefork children.
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus_multiproc
+      WORKER_METRICS_PORT: "9100"
+    expose:
+      - "9100"
     volumes:
       - appdata:/data
     depends_on:
@@ -113,6 +118,20 @@ services:
     depends_on:
       - backend
 
+  # Optional metrics stack. Start with `--profile observability`.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+      - worker
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -132,3 +151,4 @@ volumes:
   redisdata:
   appdata:
   ollamadata:
+  promdata:

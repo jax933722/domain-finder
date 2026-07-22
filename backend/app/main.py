@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import time
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select, text
+
+from app.core.logging import request_id_ctx
+from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS
 
 from app.api.routes import admin, auth, jobs, uploads
 from app.core.config import settings
@@ -76,6 +82,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    """Attach a correlation id and record request metrics/latency."""
+    req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+    token = request_id_ctx.set(req_id)
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = req_id
+        return response
+    finally:
+        # Use the matched route template to keep metric label cardinality low
+        # (so /jobs/{id}/progress is one series, not one per job id).
+        route = request.scope.get("route")
+        path = getattr(route, "path_format", None) or getattr(route, "path", None) or "unmatched"
+        elapsed = time.perf_counter() - start
+        if settings.METRICS_ENABLED:
+            HTTP_REQUESTS.labels(request.method, path, str(status_code)).inc()
+            HTTP_LATENCY.labels(request.method, path).observe(elapsed)
+        request_id_ctx.reset(token)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    """Prometheus scrape endpoint (API process metrics)."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 api_prefix = settings.API_V1_PREFIX
 app.include_router(auth.router, prefix=api_prefix)
