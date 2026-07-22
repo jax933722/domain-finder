@@ -134,6 +134,16 @@ def _name_domain_match(clean_name: str, registrable: str) -> float:
     return 0.0
 
 
+def name_domain_match(clean_name: str, registrable: str) -> float:
+    """Public wrapper: score 0-1 how well a domain matches a company name."""
+    return _name_domain_match(clean_name, registrable)
+
+
+def is_aggregator(domain: str) -> bool:
+    """True if the domain is a directory/social site, never an official website."""
+    return domain in AGGREGATOR_DOMAINS
+
+
 def verify(clean_name: str, responses: list[ProviderResponse]) -> VerificationOutcome:
     """Aggregate provider responses into a single verification decision."""
 

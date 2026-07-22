@@ -14,6 +14,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.search.llm import llm_rerank
 from app.services.search.providers import BaseProvider, ProviderResponse
 from app.services.search.verifier import verify
 
@@ -129,6 +130,42 @@ async def discover_domain(
                 processing_time_ms=elapsed,
                 attempts=attempts,
             )
+
+    # Deterministic verification did not clear the bar. If a self-hosted LLM is
+    # enabled, let it disambiguate among the *real* candidates we collected. It
+    # can only pick an already-seen domain — it never invents one.
+    llm_outcome = await llm_rerank(clean_company, responses, client)
+    if llm_outcome and llm_outcome.domain:
+        elapsed = int((time.perf_counter() - start) * 1000)
+        attempts.append(
+            SearchAttempt(
+                provider="llm-rerank",
+                query=query,
+                search_url="",
+                result_domain=llm_outcome.domain,
+                success=True,
+                response_time_ms=0,
+            )
+        )
+        logger.info(
+            "LLM resolved %r -> %s (%.2f)",
+            clean_company,
+            llm_outcome.domain,
+            llm_outcome.confidence,
+        )
+        last_url = next((a.search_url for a in reversed(attempts) if a.search_url), None)
+        return DiscoveryResult(
+            clean_company=clean_company,
+            domain=llm_outcome.domain,
+            status="VERIFIED",
+            confidence=llm_outcome.confidence,
+            source=llm_outcome.source,
+            search_url=last_url,
+            query=query,
+            reason=None,
+            processing_time_ms=elapsed,
+            attempts=attempts,
+        )
 
     # Nothing cleared the bar — return an honest NOT FOUND with the last reason.
     final = verify(clean_company, responses)

@@ -105,6 +105,17 @@ class Settings(BaseSettings):
             return [i.strip().lower() for i in v.split(",") if i.strip()]
         return v
 
+    # ---- Self-hosted LLM re-ranker (optional) ----
+    # A local LLM (via Ollama) is used ONLY to disambiguate among the real search
+    # results we already fetched — it can never invent a domain. It runs as a
+    # fallback when the deterministic verifier is not confident.
+    LLM_ENABLED: bool = False
+    OLLAMA_URL: str | None = None  # e.g. http://ollama:11434
+    LLM_MODEL: str = "llama3.1"
+    LLM_TIMEOUT_SECONDS: float = 30.0
+    # Max candidate results handed to the LLM per company (keeps the prompt small).
+    LLM_MAX_CANDIDATES: int = 8
+
     # ---- Domain discovery tuning ----
     SEARCH_TIMEOUT_SECONDS: float = 15.0
     SEARCH_MAX_RETRIES: int = 3

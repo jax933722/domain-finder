@@ -36,6 +36,9 @@ trusted internet sources, and exports the enriched file.
   Bing) and authoritative structured data (Wikidata *official website* property).
 - **Confidence scoring** with a configurable threshold — low-confidence results
   become `NOT FOUND` with a human-readable reason.
+- **Optional self-hosted LLM re-ranker** (Ollama) that disambiguates among *real*
+  search results to boost accuracy — it can only pick a fetched candidate, never
+  invent a domain.
 - **Real-time progress**, live logs, and search statistics while processing.
 - **Preview results while processing** and download the enriched **Excel** or **CSV**.
 - **Redis caching + de-duplication** — each unique company is searched only once.
@@ -213,10 +216,39 @@ For each **cleaned** company name the orchestrator
      multi-provider agreement, and corroborating evidence (LinkedIn/Crunchbase).
    - **Aggregators** (LinkedIn, Crunchbase, Wikipedia, ...) are never returned as
      the official domain — only a company's own site qualifies.
-4. If the best candidate is below `CONFIDENCE_THRESHOLD`, the row is `NOT FOUND`
-   with a reason. **No domain is ever invented.**
+4. **(Optional) Self-hosted LLM re-rank** — if `LLM_ENABLED=true`, a local model
+   (via Ollama) is asked to disambiguate among the *real candidates already
+   fetched* when step 3 is not confident. See below.
+5. If nothing clears `CONFIDENCE_THRESHOLD`, the row is `NOT FOUND` with a reason.
+   **No domain is ever invented.**
 
 Every attempt is logged (provider, query, URL, timing, outcome) for transparency.
+
+### Optional: self-hosted LLM re-ranker (accuracy booster)
+
+A local LLM can improve accuracy on ambiguous cases (e.g. picking
+`aws.amazon.com` for "Amazon Web Services", or the correct company when several
+share a name) — **without ever compromising the "never guess" promise**:
+
+- The LLM is **never** asked to recall a domain from memory. It only **chooses**
+  among the candidate URLs that real searches returned.
+- Its pick is re-validated by the same guardrails: the domain must be one of the
+  actual candidates (anything else is rejected as a hallucination), must not be
+  an aggregator, and must still clear the confidence threshold. Wikidata's
+  authoritative answer always outranks it.
+- It runs **only as a fallback** — when deterministic verification is already
+  confident, the LLM is not called (fast and free).
+
+Enable it (uses [Ollama](https://ollama.com), no external API):
+
+```bash
+docker compose --profile llm up -d ollama          # start the model server
+docker compose exec ollama ollama pull llama3.1    # download a model once
+# set LLM_ENABLED=true in .env, then:
+docker compose up -d backend worker
+```
+
+Relevant settings: `LLM_ENABLED`, `OLLAMA_URL`, `LLM_MODEL` (see `.env.example`).
 
 ---
 

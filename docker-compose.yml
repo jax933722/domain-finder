@@ -40,6 +40,25 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional self-hosted LLM re-ranker. Started only with `--profile llm`, since
+  # it downloads a multi-GB model. After it is up, pull the model once:
+  #   docker compose exec ollama ollama pull llama3.1
+  # Then set LLM_ENABLED=true in .env and restart backend + worker.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    restart: unless-stopped
+    volumes:
+      - ollamadata:/root/.ollama
+    # Uncomment to expose the model host GPU (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -48,6 +67,7 @@ services:
       POSTGRES_HOST: db
       REDIS_HOST: redis
       SEARXNG_URL: http://searxng:8080
+      OLLAMA_URL: http://ollama:11434
     volumes:
       - appdata:/data
     depends_on:
@@ -72,6 +92,7 @@ services:
       POSTGRES_HOST: db
       REDIS_HOST: redis
       SEARXNG_URL: http://searxng:8080
+      OLLAMA_URL: http://ollama:11434
     volumes:
       - appdata:/data
     depends_on:
@@ -110,3 +131,4 @@ volumes:
   pgdata:
   redisdata:
   appdata:
+  ollamadata:
