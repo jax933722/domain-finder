@@ -91,8 +91,12 @@ class Settings(BaseSettings):
     GOOGLE_CSE_ENGINE_ID: str | None = None
     BING_SEARCH_API_KEY: str | None = None
 
+    # Self-hosted SearXNG meta-search instance (no API key required). Aggregates
+    # Google/Bing/DuckDuckGo and returns JSON. e.g. http://searxng:8080
+    SEARXNG_URL: str | None = None
+
     # Ordered list of providers to attempt. Overridable via env (comma list).
-    SEARCH_PROVIDER_ORDER: List[str] = ["brave", "google", "bing", "wikipedia"]
+    SEARCH_PROVIDER_ORDER: List[str] = ["brave", "google", "bing", "searxng", "wikipedia"]
 
     @field_validator("SEARCH_PROVIDER_ORDER", mode="before")
     @classmethod

@@ -26,6 +26,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # Self-hosted meta-search — provides keyless domain discovery.
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -33,6 +47,7 @@ services:
     environment:
       POSTGRES_HOST: db
       REDIS_HOST: redis
+      SEARXNG_URL: http://searxng:8080
     volumes:
       - appdata:/data
     depends_on:
@@ -40,6 +55,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      searxng:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -54,6 +71,7 @@ services:
     environment:
       POSTGRES_HOST: db
       REDIS_HOST: redis
+      SEARXNG_URL: http://searxng:8080
     volumes:
       - appdata:/data
     depends_on:
@@ -61,6 +79,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      searxng:
+        condition: service_started
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=info --concurrency=4
 
   frontend:

@@ -1,0 +1,37 @@
+# SearXNG configuration for Domain Finder.
+# Builds on SearXNG's defaults and only overrides what we need:
+#   * enable the JSON output format (required by the SearxngProvider)
+#   * disable the bot limiter (this instance is only queried by our backend)
+use_default_settings: true
+
+general:
+  instance_name: "Domain Finder Search"
+
+server:
+  # Override in production via the SEARXNG_SECRET env var interpolation below.
+  secret_key: "please_change_this_searxng_secret_key"
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+# Trim to fast, reliable general-web engines. Add/remove engines as needed.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: wikidata
+    disabled: false

@@ -121,8 +121,9 @@ or sign up for a new (non-admin) account.
 
 A sample file to try is at `sample_data/companies_sample.csv`.
 
-> Even with **no** search API keys configured, the app works out of the box using
-> the free **Wikidata** provider (lower coverage than the paid APIs).
+> Even with **no** search API keys, the app works out of the box: `docker compose`
+> starts a self-hosted **SearXNG** meta-search instance (keyless) plus the free
+> **Wikidata** provider. Add Brave/Google/Bing keys later for higher volume.
 
 ---
 
@@ -181,9 +182,21 @@ to block.
 | **Brave Search** (preferred) | `BRAVE_SEARCH_API_KEY` | Fast, generous free tier. |
 | **Google Custom Search** | `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_ENGINE_ID` | High quality. |
 | **Bing Web Search** | `BING_SEARCH_API_KEY` | Broad coverage. |
+| **SearXNG (self-hosted)** | `SEARXNG_URL` *(no API key)* | Meta-search over Google/Bing/DuckDuckGo; you run the instance, so nothing to buy and nothing to block. |
 | **Wikidata / Wikipedia** | *(none)* | Authoritative `official website` (P856); always available. |
 
 Providers without configured credentials are automatically skipped.
+
+### No API keys? Use SearXNG (keyless)
+
+`docker compose up` already starts a **SearXNG** service and points the backend
+at it via `SEARXNG_URL=http://searxng:8080` — so domain discovery works out of
+the box with **zero paid keys**, aggregating Google/Bing/DuckDuckGo through your
+own instance. Its config lives in [`searxng/settings.yml`](searxng/settings.yml)
+(the `json` output format is enabled there, which the provider requires). Combined
+with the keyless Wikidata provider, you get solid coverage without any API
+subscription. Add the paid providers later for higher volume — they simply take
+priority in `SEARCH_PROVIDER_ORDER` when configured.
 
 ---
 

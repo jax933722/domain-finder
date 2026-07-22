@@ -227,6 +227,73 @@ class BingProvider(BaseProvider):
             )
 
 
+class SearxngProvider(BaseProvider):
+    """Self-hosted SearXNG meta-search — no API key required.
+
+    SearXNG aggregates results from many upstream engines (Google, Bing,
+    DuckDuckGo, ...) behind a single JSON endpoint that *you* run, so there is
+    no per-provider key and no risk of the app itself being blocked. The
+    instance must have the ``json`` output format enabled (see the bundled
+    ``searxng/settings.yml``).
+    """
+
+    name = "searxng"
+
+    @property
+    def available(self) -> bool:
+        return bool(settings.SEARXNG_URL)
+
+    async def search(self, client: httpx.AsyncClient, query: str) -> ProviderResponse:
+        start = time.perf_counter()
+        base = (settings.SEARXNG_URL or "").rstrip("/")
+        endpoint = f"{base}/search"
+        params = {
+            "q": query,
+            "format": "json",
+            "categories": "general",
+            "language": "en",
+            "safesearch": 0,
+        }
+
+        @_retry()
+        async def _do() -> httpx.Response:
+            resp = await client.get(endpoint, params=params)
+            resp.raise_for_status()
+            return resp
+
+        try:
+            resp = await _do()
+            data = resp.json()
+            results = []
+            for i, item in enumerate(data.get("results", [])[:10]):
+                url = item.get("url", "")
+                if not url:
+                    continue
+                results.append(
+                    SearchResult(
+                        title=item.get("title", ""),
+                        url=url,
+                        description=item.get("content", ""),
+                        rank=i + 1,
+                    )
+                )
+            return ProviderResponse(
+                provider=self.name,
+                query=query,
+                results=results,
+                search_url=str(resp.request.url),
+                response_time_ms=int((time.perf_counter() - start) * 1000),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SearXNG search failed for %r: %s", query, exc)
+            return ProviderResponse(
+                provider=self.name,
+                query=query,
+                error=str(exc),
+                response_time_ms=int((time.perf_counter() - start) * 1000),
+            )
+
+
 class WikidataProvider(BaseProvider):
     """Authoritative source: Wikidata's *official website* property (P856).
 
@@ -364,6 +431,7 @@ PROVIDER_REGISTRY: dict[str, type[BaseProvider]] = {
     "brave": BraveProvider,
     "google": GoogleCSEProvider,
     "bing": BingProvider,
+    "searxng": SearxngProvider,
     "wikipedia": WikidataProvider,
 }
 
