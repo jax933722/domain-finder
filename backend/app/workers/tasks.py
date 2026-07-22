@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -62,6 +62,11 @@ async def _run_job(job_id: str) -> dict[str, Any]:
             if job is None:
                 logger.error("Job %s not found", job_id)
                 return {"status": "missing"}
+            # Idempotency: a redelivered task (Celery acks-late) must not double
+            # a completed job or duplicate rows.
+            if job.status == JobStatus.COMPLETED:
+                logger.info("Job %s already completed; skipping.", job_id)
+                return {"status": "already_completed"}
             upload = await session.get(Upload, job.upload_id)
             if upload is None:
                 await _fail_job(session, job, "Upload record missing.")
@@ -72,6 +77,10 @@ async def _run_job(job_id: str) -> dict[str, Any]:
                 upload.content_type,
                 upload.filename,
             )
+            # Clear any rows from a previous partial run so results are consistent.
+            await session.execute(delete(Company).where(Company.job_id == job.id))
+            await session.execute(delete(SearchHistory).where(SearchHistory.job_id == job.id))
+            await session.commit()
 
         await _log(factory, job_id, LogLevel.INFO, "Starting job")
         await _process(factory, job_id, company_column, stored_path, content_type, filename)

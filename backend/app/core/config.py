@@ -127,6 +127,15 @@ class Settings(BaseSettings):
     # Max concurrent company lookups inside a single processing job.
     JOB_CONCURRENCY: int = 10
 
+    # ---- Live reachability confirmation ----
+    # After a domain is identified, optionally confirm it actually responds and
+    # capture where it redirects. This never invents a domain — it only validates
+    # one already found — but it catches dead/parked/wrong candidates.
+    VERIFY_DOMAIN_REACHABLE: bool = True
+    REACHABILITY_TIMEOUT_SECONDS: float = 6.0
+    # Confidence penalty applied when a (non-authoritative) domain does not respond.
+    REACHABILITY_PENALTY: float = 0.3
+
     # ---- Uploads ----
     MAX_UPLOAD_ROWS: int = 200_000
     MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB

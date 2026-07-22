@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from fastapi.responses import JSONResponse
+from sqlalchemy import select, text
 
 from app.api.routes import admin, auth, jobs, uploads
 from app.core.config import settings
@@ -85,7 +86,27 @@ app.include_router(admin.router, prefix=api_prefix)
 
 @app.get("/health", tags=["health"])
 async def health() -> dict[str, str]:
+    """Liveness: the process is up and serving."""
     return {"status": "ok", "service": settings.PROJECT_NAME}
+
+
+@app.get("/health/ready", tags=["health"])
+async def readiness() -> JSONResponse:
+    """Readiness: dependencies (Postgres + Redis) are reachable."""
+    db_ok = False
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Readiness DB check failed: %s", exc)
+
+    redis_ok = await cache.ping()
+    ready = db_ok and redis_ok
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"ready": ready, "database": db_ok, "redis": redis_ok},
+    )
 
 
 @app.get("/", tags=["health"])

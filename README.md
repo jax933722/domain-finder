@@ -51,6 +51,22 @@ trusted internet sources, and exports the enriched file.
 - **Dark mode**, responsive design, clean shadcn-style UI.
 - **Dockerized** with Postgres, Redis, backend, worker, frontend, and Nginx.
 
+### Robustness
+
+- **Live reachability check** — a found domain is probed (HEAD→GET, redirects
+  followed) before it's trusted; dead/parked domains are penalized or dropped to
+  `NOT FOUND`, and a live cross-domain redirect adopts the canonical own-site.
+- **Graceful Redis degradation** — Redis is a cache/UX layer, not the source of
+  truth; an outage silently falls back to cache-misses instead of failing jobs.
+- **Idempotent, safe re-runs** — a redelivered task never doubles a completed job
+  or duplicates rows (prior partial results are cleared first).
+- **Readiness probe** — `GET /health/ready` verifies Postgres + Redis (503 if not
+  ready), distinct from the `/health` liveness check.
+- **Tolerant file parsing** — encoding fallbacks (UTF-8/BOM/Latin-1/CP1252),
+  delimiter detection, blank/duplicate-header normalization, empty-row pruning.
+- Per-request **retries with exponential backoff**, timeouts, connection pooling,
+  and bounded concurrency throughout.
+
 ---
 
 ## Architecture

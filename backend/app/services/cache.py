@@ -10,10 +10,12 @@ Two responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -47,12 +49,29 @@ async def close_redis() -> None:
         _pool = None
 
 
+# Redis is a performance/UX layer, not the source of truth (Postgres is). A
+# transient Redis outage must degrade to a cache-miss, never crash a job — so
+# every operation is wrapped and failures are logged and swallowed.
+_RedisFailure = (RedisError, OSError, asyncio.TimeoutError)
+
+
+async def ping() -> bool:
+    """Readiness probe helper — True if Redis responds."""
+    try:
+        return bool(await get_redis().ping())
+    except _RedisFailure:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Domain cache
 # --------------------------------------------------------------------------- #
 async def get_cached_domain(key: str) -> dict[str, Any] | None:
-    redis = get_redis()
-    raw = await redis.get(_DOMAIN_PREFIX + key)
+    try:
+        raw = await get_redis().get(_DOMAIN_PREFIX + key)
+    except _RedisFailure as exc:
+        logger.warning("Redis get failed (treating as miss): %s", exc)
+        return None
     if raw is None:
         return None
     try:
@@ -62,18 +81,24 @@ async def get_cached_domain(key: str) -> dict[str, Any] | None:
 
 
 async def set_cached_domain(key: str, payload: dict[str, Any], ttl: int | None = None) -> None:
-    redis = get_redis()
-    await redis.set(
-        _DOMAIN_PREFIX + key,
-        json.dumps(payload),
-        ex=ttl if ttl is not None else settings.DOMAIN_CACHE_TTL_SECONDS,
-    )
+    try:
+        await get_redis().set(
+            _DOMAIN_PREFIX + key,
+            json.dumps(payload),
+            ex=ttl if ttl is not None else settings.DOMAIN_CACHE_TTL_SECONDS,
+        )
+    except _RedisFailure as exc:
+        logger.warning("Redis set failed (skipping cache write): %s", exc)
 
 
 async def cache_stats() -> dict[str, Any]:
-    redis = get_redis()
-    keys = await redis.keys(_DOMAIN_PREFIX + "*")
-    info = await redis.info("stats")
+    try:
+        redis = get_redis()
+        keys = await redis.keys(_DOMAIN_PREFIX + "*")
+        info = await redis.info("stats")
+    except _RedisFailure as exc:
+        logger.warning("Redis stats unavailable: %s", exc)
+        return {"cached_domains": 0, "keyspace_hits": 0, "keyspace_misses": 0, "hit_rate": 0.0}
     hits = int(info.get("keyspace_hits", 0))
     misses = int(info.get("keyspace_misses", 0))
     total = hits + misses
@@ -89,13 +114,18 @@ async def cache_stats() -> dict[str, Any]:
 # Job progress
 # --------------------------------------------------------------------------- #
 async def set_progress(job_id: str, payload: dict[str, Any], ttl: int = 60 * 60 * 24) -> None:
-    redis = get_redis()
-    await redis.set(_PROGRESS_PREFIX + job_id, json.dumps(payload), ex=ttl)
+    try:
+        await get_redis().set(_PROGRESS_PREFIX + job_id, json.dumps(payload), ex=ttl)
+    except _RedisFailure as exc:
+        logger.warning("Redis progress write failed: %s", exc)
 
 
 async def get_progress(job_id: str) -> dict[str, Any] | None:
-    redis = get_redis()
-    raw = await redis.get(_PROGRESS_PREFIX + job_id)
+    try:
+        raw = await get_redis().get(_PROGRESS_PREFIX + job_id)
+    except _RedisFailure as exc:
+        logger.warning("Redis progress read failed: %s", exc)
+        return None
     return json.loads(raw) if raw else None
 
 
@@ -103,19 +133,24 @@ async def get_progress(job_id: str) -> dict[str, Any] | None:
 # Live logs (capped list)
 # --------------------------------------------------------------------------- #
 async def push_log(job_id: str, entry: dict[str, Any], ttl: int = 60 * 60 * 24) -> None:
-    redis = get_redis()
-    key = _LOG_PREFIX + job_id
-    pipe = redis.pipeline()
-    pipe.rpush(key, json.dumps(entry))
-    pipe.ltrim(key, -_MAX_LOG_ENTRIES, -1)
-    pipe.expire(key, ttl)
-    await pipe.execute()
+    try:
+        redis = get_redis()
+        key = _LOG_PREFIX + job_id
+        pipe = redis.pipeline()
+        pipe.rpush(key, json.dumps(entry))
+        pipe.ltrim(key, -_MAX_LOG_ENTRIES, -1)
+        pipe.expire(key, ttl)
+        await pipe.execute()
+    except _RedisFailure as exc:
+        logger.warning("Redis log push failed: %s", exc)
 
 
 async def get_logs(job_id: str, offset: int = 0) -> list[dict[str, Any]]:
-    redis = get_redis()
-    key = _LOG_PREFIX + job_id
-    raw = await redis.lrange(key, offset, -1)
+    try:
+        raw = await get_redis().lrange(_LOG_PREFIX + job_id, offset, -1)
+    except _RedisFailure as exc:
+        logger.warning("Redis log read failed: %s", exc)
+        return []
     out = []
     for item in raw:
         try:

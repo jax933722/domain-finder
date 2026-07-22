@@ -26,18 +26,103 @@ def ensure_dirs() -> None:
     os.makedirs(settings.RESULT_DIR, exist_ok=True)
 
 
+_DELIMITERS = [",", ";", "\t", "|"]
+
+
+def _detect_delimiter(header_line: str) -> str:
+    """Pick the delimiter that appears most in the header, defaulting to comma.
+
+    This is deliberately simpler and more predictable than ``csv.Sniffer``,
+    which guesses stray letters as delimiters on single-column files.
+    """
+    best = ","
+    best_count = 0
+    for delim in _DELIMITERS:
+        count = header_line.count(delim)
+        if count > best_count:
+            best, best_count = delim, count
+    return best
+
+
+def _read_csv_robust(path: str) -> pd.DataFrame:
+    """Read a CSV tolerating unknown encodings and delimiters.
+
+    - Tries UTF-8 (BOM-aware) first, then common fallbacks, so files exported
+      from Excel/Windows don't blow up on decoding.
+    - Detects the delimiter (comma/semicolon/tab/pipe) from the header line.
+    - ``on_bad_lines='skip'`` keeps a few malformed rows from failing the whole
+      upload.
+    """
+    last_exc: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+        try:
+            with open(path, encoding=encoding) as fh:
+                first_line = fh.readline()
+            delimiter = _detect_delimiter(first_line)
+            return pd.read_csv(
+                path,
+                dtype=str,
+                keep_default_na=False,
+                sep=delimiter,
+                engine="python",
+                encoding=encoding,
+                on_bad_lines="skip",
+            )
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            last_exc = exc
+            continue
+    if last_exc:
+        raise last_exc
+    raise ValueError("Unable to parse CSV file.")
+
+
+def _normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean up a freshly parsed frame so downstream code can trust it."""
+    # Stringify and de-duplicate column names (pandas appends .1, .2 already,
+    # but blank headers become "Unnamed: N" — make those human-friendly).
+    new_cols: list[str] = []
+    seen: dict[str, int] = {}
+    for i, col in enumerate(df.columns):
+        name = str(col).strip() or f"Column {i + 1}"
+        if name.startswith("Unnamed:"):
+            name = f"Column {i + 1}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name} ({seen[name]})"
+        else:
+            seen[name] = 0
+        new_cols.append(name)
+    df.columns = new_cols
+
+    # Drop fully-empty columns and rows.
+    df = df.replace({None: ""}).fillna("")
+    df = df.loc[:, ~(df == "").all(axis=0)]
+    df = df.loc[~(df == "").all(axis=1)]
+    return df.reset_index(drop=True)
+
+
 def read_dataframe(path: str, content_type: str, filename: str) -> pd.DataFrame:
-    """Read an uploaded CSV/XLSX into a DataFrame, with dtype preserved as str."""
+    """Read an uploaded CSV/XLSX into a normalized string DataFrame."""
     lowered = filename.lower()
-    if lowered.endswith(".csv") or "csv" in content_type:
-        return pd.read_csv(path, dtype=str, keep_default_na=False)
-    if lowered.endswith((".xlsx", ".xlsm", ".xls")) or "sheet" in content_type or "excel" in content_type:
-        return pd.read_excel(path, dtype=str, keep_default_na=False)
-    # Fallback: try CSV then Excel.
-    try:
-        return pd.read_csv(path, dtype=str, keep_default_na=False)
-    except Exception:  # noqa: BLE001
-        return pd.read_excel(path, dtype=str, keep_default_na=False)
+    is_csv = lowered.endswith(".csv") or "csv" in (content_type or "")
+    is_excel = (
+        lowered.endswith((".xlsx", ".xlsm", ".xls"))
+        or "sheet" in (content_type or "")
+        or "excel" in (content_type or "")
+    )
+
+    if is_csv:
+        df = _read_csv_robust(path)
+    elif is_excel:
+        df = pd.read_excel(path, dtype=str, keep_default_na=False)
+    else:
+        # Unknown extension: try CSV first, then Excel.
+        try:
+            df = _read_csv_robust(path)
+        except Exception:  # noqa: BLE001
+            df = pd.read_excel(path, dtype=str, keep_default_na=False)
+
+    return _normalize_frame(df)
 
 
 def dataframe_preview(df: pd.DataFrame, limit: int = 20) -> dict[str, Any]:
