@@ -152,6 +152,9 @@ PostgreSQL, Redis, Celery, httpx, tenacity, pandas + openpyxl, python-jose, pass
 
 ## Quick start (Docker)
 
+> 📖 For a full step-by-step walkthrough (Docker **and** native/no-Docker),
+> ports, and troubleshooting, see **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**.
+
 Prerequisites: Docker + Docker Compose.
 
 ```bash
