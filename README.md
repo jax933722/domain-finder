@@ -155,6 +155,10 @@ PostgreSQL, Redis, Celery, httpx, tenacity, pandas + openpyxl, python-jose, pass
 > 📖 For a full step-by-step walkthrough (Docker **and** native/no-Docker),
 > ports, and troubleshooting, see **[docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md)**.
 
+**One-click (with Docker Desktop running):** double-click **`start.bat`**
+(Windows) or **`start.command`** (macOS) to build, launch, and open the app;
+**`stop.bat`** / **`stop.command`** shuts it down. No commands required.
+
 Prerequisites: Docker + Docker Compose.
 
 ```bash

@@ -1,0 +1,8 @@
+# Ensure launcher scripts always check out with the right line endings,
+# regardless of the contributor's OS. Wrong endings break these scripts:
+#   - Windows .bat files need CRLF (labels/goto misbehave with LF).
+#   - Unix shell scripts need LF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.command text eol=lf
+*.sh    text eol=lf

@@ -13,6 +13,33 @@ bundled SearXNG + Wikidata providers.
 
 ---
 
+## Easiest of all — one-click launchers
+
+If you have **Docker Desktop installed and running**, you don't need to type any
+commands:
+
+| Your OS | To start | To stop |
+| --- | --- | --- |
+| **Windows** | double-click **`start.bat`** | double-click **`stop.bat`** |
+| **macOS** | double-click **`start.command`** | double-click **`stop.command`** |
+| **Linux** | run `./start.command` | run `./stop.command` |
+
+`start` builds and launches everything, waits until it's ready, and opens
+http://localhost:8080 in your browser. On the very first run it also creates your
+`.env` automatically. `stop` shuts everything down (your data is kept).
+
+> **macOS note:** the first time you open `start.command`, macOS Gatekeeper may
+> warn about an unidentified developer. Right-click the file → **Open** →
+> **Open**, and it will remember your choice afterwards.
+>
+> **Windows note:** if SmartScreen shows a blue popup, click **More info** →
+> **Run anyway** (these are plain text scripts — you can open them to inspect).
+
+The rest of this document explains the same thing done manually, plus the native
+(no-Docker) developer setup.
+
+---
+
 ## Option A — Docker (recommended)
 
 ### 1. Install Docker
